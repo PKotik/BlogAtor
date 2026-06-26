@@ -16,7 +16,6 @@ namespace BlogAtor.Server.Data
         {
             base.OnModelCreating(modelBuilder);
 
-            // Уникальный индекс для PostId (чтобы избежать дубликатов)
             modelBuilder.Entity<RedditPost>()
                 .HasIndex(p => p.PostId)
                 .IsUnique();

@@ -9,12 +9,12 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.Configure<RedditConfig>(
     builder.Configuration.GetSection("Reddit"));
 
-// 2. Настройка DbContext
+// 2. Настройка DbContext для SQLite
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
-    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+    options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection")));
 
-// 3. Регистрация сервисов
-builder.Services.AddScoped<IRedditService, RedditService>();
+// 3. Регистрация сервисов в DI (используем Mock)
+builder.Services.AddScoped<IRedditService, MockRedditService>();
 
 // 4. Добавление контроллеров
 builder.Services.AddControllers();
@@ -45,7 +45,6 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-// 7. Middleware
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -60,7 +59,7 @@ app.UseCors("AllowAngular");
 app.UseAuthorization();
 app.MapControllers();
 
-// 8. Создание БД
+// Создание БД (если нет)
 using (var scope = app.Services.CreateScope())
 {
     var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();

@@ -1,7 +1,6 @@
 using Microsoft.Extensions.Options;
 using Microsoft.EntityFrameworkCore;
-using Reddit;
-using Reddit.Controllers;
+using System.Text.Json;
 using BlogAtor.Server.Models;
 using BlogAtor.Server.Config;
 using BlogAtor.Server.Data;
@@ -10,25 +9,18 @@ namespace BlogAtor.Server.Services
 {
     public class RedditService : IRedditService
     {
-        private readonly RedditClient _reddit;
+        private readonly HttpClient _httpClient;
         private readonly ApplicationDbContext _context;
         private readonly ILogger<RedditService> _logger;
-        private readonly RedditConfig _config;
 
         public RedditService(
-            IOptions<RedditConfig> config,
+            HttpClient httpClient,
             ApplicationDbContext context,
             ILogger<RedditService> logger)
         {
-            _config = config.Value;
+            _httpClient = httpClient;
             _context = context;
             _logger = logger;
-
-            _reddit = new RedditClient(
-                appId: _config.ClientId,
-                appSecret: _config.ClientSecret,
-                userAgent: _config.UserAgent
-            );
         }
 
         public async Task<List<RedditPost>> GetHotPostsFromSubredditAsync(string subreddit, int limit = 25)
@@ -39,29 +31,58 @@ namespace BlogAtor.Server.Services
             {
                 _logger.LogInformation("Начат сбор постов из r/{Subreddit}", subreddit);
 
-                var sub = _reddit.Subreddit(subreddit);
-                var hotPosts = sub.Posts.Hot.Take(limit);
+                // ✅ Используем RePull (работает без блокировок)
+                var url = $"https://api.repull.io/reddit/search/submission/?subreddit={subreddit}&limit={limit}";
 
-                foreach (var post in hotPosts)
+                _logger.LogInformation("Запрос к URL: {Url}", url);
+
+                var response = await _httpClient.GetAsync(url);
+
+                _logger.LogInformation("Статус ответа: {StatusCode}", response.StatusCode);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    _logger.LogError("Ошибка API: {StatusCode}, Content: {Content}",
+                        response.StatusCode, errorContent);
+                    throw new Exception($"API вернул {response.StatusCode}");
+                }
+
+                var json = await response.Content.ReadAsStringAsync();
+
+                var options = new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                };
+
+                // Для RePull структура ответа такая же как у Pushshift
+                var pushshiftResponse = JsonSerializer.Deserialize<PushshiftResponse>(json, options);
+
+                if (pushshiftResponse?.Data == null || !pushshiftResponse.Data.Any())
+                {
+                    _logger.LogWarning("Нет данных в ответе");
+                    return posts;
+                }
+
+                foreach (var postData in pushshiftResponse.Data)
                 {
                     posts.Add(new RedditPost
                     {
-                        PostId = post.Id,
-                        Subreddit = subreddit,
-                        Author = post.Author ?? "unknown",
-                        Title = post.Title ?? "No title",
-                        Content = post.Listing.SelfText ?? string.Empty,  // ✅ Через Listing
-                        Url = $"https://reddit.com{post.Permalink}",
-                        Score = post.Score,
-                        CommentCount = post.Listing.NumComments,          // ✅ Через Listing
-                        CreatedAt = post.Created,
+                        PostId = postData.Id,
+                        Subreddit = postData.Subreddit ?? subreddit,
+                        Author = postData.Author ?? "unknown",
+                        Title = postData.Title ?? "No title",
+                        Content = postData.SelfText ?? string.Empty,
+                        Url = postData.Url ?? $"https://reddit.com/r/{subreddit}/comments/{postData.Id}",
+                        Score = postData.Score ?? 0,
+                        CommentCount = postData.NumComments ?? 0,
+                        CreatedAt = DateTimeOffset.FromUnixTimeSeconds(postData.CreatedUtc ?? 0).UtcDateTime,
                         CollectedAt = DateTime.UtcNow,
-                        Source = "Reddit"
+                        Source = "Reddit(Pushshift)"
                     });
                 }
 
                 _logger.LogInformation("Получено {Count} постов из r/{Subreddit}", posts.Count, subreddit);
-                await Task.Delay(_config.RateLimitDelayMs);
             }
             catch (Exception ex)
             {
@@ -80,27 +101,51 @@ namespace BlogAtor.Server.Services
             {
                 _logger.LogInformation("Поиск постов автора {Author}", author);
 
-                var searchResults = _reddit.Search($"author:\"{author}\"", limit: limit);
+                var url = $"https://api.repull.io/reddit/search/submission/?author={author}&limit={limit}";
 
-                foreach (var post in searchResults)
+                var response = await _httpClient.GetAsync(url);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    _logger.LogError("Ошибка API: {StatusCode}", response.StatusCode);
+                    throw new Exception($"API вернул {response.StatusCode}");
+                }
+
+                var json = await response.Content.ReadAsStringAsync();
+
+                var options = new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                };
+
+                var pushshiftResponse = JsonSerializer.Deserialize<PushshiftResponse>(json, options);
+
+                if (pushshiftResponse?.Data == null)
+                {
+                    _logger.LogWarning("Нет данных в ответе");
+                    return posts;
+                }
+
+                foreach (var postData in pushshiftResponse.Data)
                 {
                     posts.Add(new RedditPost
                     {
-                        PostId = post.Id,
-                        Subreddit = post.Subreddit ?? "unknown",
-                        Author = post.Author ?? author,
-                        Title = post.Title ?? "No title",
-                        Content = post.Listing.SelfText ?? string.Empty,  // ✅ Через Listing
-                        Url = $"https://reddit.com{post.Permalink}",
-                        Score = post.Score,
-                        CommentCount = post.Listing.NumComments,          // ✅ Через Listing
-                        CreatedAt = post.Created,
+                        PostId = postData.Id,
+                        Subreddit = postData.Subreddit ?? "unknown",
+                        Author = postData.Author ?? author,
+                        Title = postData.Title ?? "No title",
+                        Content = postData.SelfText ?? string.Empty,
+                        Url = postData.Url ?? $"https://reddit.com/r/{postData.Subreddit}/comments/{postData.Id}",
+                        Score = postData.Score ?? 0,
+                        CommentCount = postData.NumComments ?? 0,
+                        CreatedAt = DateTimeOffset.FromUnixTimeSeconds(postData.CreatedUtc ?? 0).UtcDateTime,
                         CollectedAt = DateTime.UtcNow,
-                        Source = "Reddit"
+                        Source = "Reddit(Pushshift)"
                     });
                 }
 
-                await Task.Delay(_config.RateLimitDelayMs);
+                _logger.LogInformation("Найдено {Count} постов автора {Author}", posts.Count, author);
             }
             catch (Exception ex)
             {

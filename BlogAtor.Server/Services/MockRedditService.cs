@@ -76,9 +76,13 @@ namespace BlogAtor.Server.Services
                     .FirstOrDefaultAsync(p => p.PostId == post.PostId);
 
                 if (existing == null)
+                {
                     await _context.RedditPosts.AddAsync(post);
+                }
                 else
                 {
+                    existing.Title = post.Title;
+                    existing.Content = post.Content;
                     existing.Score = post.Score;
                     existing.CommentCount = post.CommentCount;
                     existing.CollectedAt = DateTime.UtcNow;
@@ -86,7 +90,7 @@ namespace BlogAtor.Server.Services
             }
 
             await _context.SaveChangesAsync();
-            _logger.LogInformation("Сохранено {Count} мок-постов в БД", posts.Count);
+            _logger.LogInformation("💾 Сохранено {Count} мок-постов в БД", posts.Count);
         }
 
         public async Task<IQueryable<RedditPost>> GetAllPostsAsync()
